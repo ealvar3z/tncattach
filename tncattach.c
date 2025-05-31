@@ -5,6 +5,8 @@
 #include <argp.h>
 #include <syslog.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <time.h>
 #include "Constants.h"
 #include "Serial.h"
@@ -23,6 +25,9 @@ struct pollfd fds[N_FDS];
 
 int attached_tnc;
 int attached_if;
+
+bool use_unix_socket = false;
+char *socket_path = NULL;
 
 char if_name[IFNAMSIZ];
 
@@ -294,6 +299,8 @@ struct arguments {
     char *ipv4;
     char *ipv6;
     char *id;
+	char *socket_path;
+	bool use_unix_socket;
     bool valid_id;
     int id_interval;
     int baudrate;
@@ -576,11 +583,21 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 
         case ARGP_KEY_ARG:
             // Check if there's now too many text arguments
-            if (state->arg_num >= N_ARGS) argp_usage(state);
-
-            // If not add to args
-            arguments->args[state->arg_num] = arg;
-            break;
+			if (!arguments->use_unix_socket && strncmp(arg, "unix:", 5) == 0) {
+				arguments->use_unix_socket = true;
+				arguments->socket_path = strdup(arg + 5);
+			} else {
+				if (arguments->use_unix_socket) argp_usage(state);
+				if (state->arg_num >= N_ARGS) argp_usage(state);
+				// add to args
+				arguments->args[state->arg_num] = arg;
+			}
+			break;
+            // if (state->arg_num >= N_ARGS) argp_usage(state);
+            //
+            // // If not add to args
+            // arguments->args[state->arg_num] = arg;
+            // break;
 
         case ARGP_KEY_END:
             // Check if there's too few text arguments
@@ -650,17 +667,18 @@ int main(int argc, char **argv) {
 
     argp_parse(&argp, argc, argv, 0, 0, &arguments);
 
-    if (arguments.kiss_over_tcp) kiss_over_tcp = true;
-
-    if (!kiss_over_tcp) {
-        arguments.baudrate = atoi(arguments.args[1]);
-    } else {
+	if (arguments.use_unix_socket) {
+		use_unix_socket = true;
+	} else if (arguments.kiss_over_tcp) {
+		kiss_over_tcp = true;
         if (!(arguments.set_tcp_host && arguments.set_tcp_port)) {
             if (!arguments.set_tcp_host) printf("Error: KISS over TCP was requested, but no host was specified\r\n");
             if (!arguments.set_tcp_port) printf("Error: KISS over TCP was requested, but no port was specified\r\n");
             exit(1);
         }
-    }
+    } else {
+		arguments.baudrate = atoi(arguments.args[1]);
+	}
     
     if (arguments.daemon) daemonize = true;
     if (arguments.verbose) verbose = true;
@@ -690,15 +708,21 @@ int main(int argc, char **argv) {
 
     attached_if = open_tap();
 
-    if (!arguments.kiss_over_tcp) {
+	if (use_unix_socket) {
+		attached_tnc = open_unix_socket(arguments.socket_path);
+		if (attached_tnc < 0) {
+			perror("open_unix_socket");
+			exit(1);
+		}
+	} else if (kiss_over_tcp) {
+		attached_tnc = open_tcp(tcp_host, tcp_port);
+	} else {
         attached_tnc = open_port(arguments.args[0]);
         if (!setup_port(attached_tnc, arguments.baudrate)) {
             printf("Error during serial port setup");
             return 0;
         }
-    } else {
-        attached_tnc = open_tcp(tcp_host, tcp_port);
-    }
+	}
 
     printf("TNC interface configured as %s\r\n", if_name);
 
